@@ -915,6 +915,31 @@ class ChallengeAttempt(Resource):
                     "success": True,
                     "data": {"status": "partial", "message": message},
                 }
+            elif status == "ratelimited":
+                # The logic layer rejected the attempt (max attempts reached
+                # or flag submission rate limit exceeded)
+                if ctftime():
+                    chal_class.ratelimited(
+                        user=user, team=team, challenge=challenge, request=request
+                    )
+                log(
+                    "submissions",
+                    "[{date}] {name} submitted {submission} on {challenge_id} with kpm {kpm} [RATELIMITED]",
+                    name=user.name,
+                    submission=request_data.get("submission", "").encode("utf-8"),
+                    challenge_id=challenge_id,
+                    kpm=kpm,
+                )
+                return (
+                    {
+                        "success": True,
+                        "data": {
+                            "status": "ratelimited",
+                            "message": message,
+                        },
+                    },
+                    429,
+                )
             elif status == "incorrect" or status is False:
                 # The challenge plugin says the input is wrong
                 if ctftime() or current_user.is_admin():

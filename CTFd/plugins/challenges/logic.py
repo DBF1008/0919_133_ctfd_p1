@@ -1,11 +1,73 @@
-from CTFd.models import Partials
+from datetime import timedelta
+
+from CTFd.models import Fails, Partials
 from CTFd.plugins.flags import FlagException, get_flag_class
+from CTFd.utils import get_config
 from CTFd.utils.config import is_teams_mode
-from CTFd.utils.user import get_current_team, get_current_user
+from CTFd.utils.security.ratelimit import consume_flag_submission_token
+from CTFd.utils.user import (
+    get_current_team,
+    get_current_user,
+    get_wrong_submissions_per_delta,
+)
+
+
+def _attempt_security_guard(challenge):
+    """
+    Enforce max_attempts and per-account/per-challenge flag submission rate
+    limiting at the logic layer so that no entrypoint can bypass them.
+
+    Returns a ChallengeResponse if the attempt must be rejected, otherwise
+    None and the caller should continue evaluating the submission.
+    """
+    from CTFd.plugins.challenges import ChallengeResponse
+
+    user = get_current_user()
+    if user is None:
+        return None
+
+    max_tries = challenge.max_attempts
+    if max_tries and max_tries > 0:
+        max_attempts_behavior = get_config("max_attempts_behavior", "lockout")
+        if max_attempts_behavior == "timeout":
+            max_attempts_timeout = int(get_config("max_attempts_timeout", 300))
+            fails = len(
+                get_wrong_submissions_per_delta(
+                    user.account_id,
+                    challenge_id=challenge.id,
+                    delta=timedelta(seconds=-max_attempts_timeout),
+                )
+            )
+            if fails >= max_tries:
+                return ChallengeResponse(
+                    status="ratelimited",
+                    message=f"Not accepted. Try again in {max_attempts_timeout} seconds",
+                )
+        else:  # lockout behavior
+            fails = Fails.query.filter_by(
+                account_id=user.account_id, challenge_id=challenge.id
+            ).count()
+            if fails >= max_tries:
+                return ChallengeResponse(
+                    status="ratelimited",
+                    message="Not accepted. You have 0 tries remaining",
+                )
+
+    if not consume_flag_submission_token(user.account_id, challenge.id):
+        return ChallengeResponse(
+            status="ratelimited",
+            message="You're submitting flags too fast. Please try again later.",
+        )
+
+    return None
 
 
 def challenge_attempt_any(submission, challenge, flags):
     from CTFd.plugins.challenges import ChallengeResponse
+
+    guard = _attempt_security_guard(challenge)
+    if guard is not None:
+        return guard
 
     for flag in flags:
         try:
@@ -27,6 +89,10 @@ def challenge_attempt_any(submission, challenge, flags):
 
 def challenge_attempt_all(submission, challenge, flags):
     from CTFd.plugins.challenges import ChallengeResponse
+
+    guard = _attempt_security_guard(challenge)
+    if guard is not None:
+        return guard
 
     user = get_current_user()
     partials = Partials.query.filter_by(
@@ -71,6 +137,10 @@ def challenge_attempt_all(submission, challenge, flags):
 
 def challenge_attempt_team(submission, challenge, flags):
     from CTFd.plugins.challenges import ChallengeResponse
+
+    guard = _attempt_security_guard(challenge)
+    if guard is not None:
+        return guard
 
     if is_teams_mode():
         user = get_current_user()
