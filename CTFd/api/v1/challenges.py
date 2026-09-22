@@ -13,6 +13,8 @@ from CTFd.cache import cache, clear_challenges, clear_ratings, clear_standings
 from CTFd.constants import RawEnum
 from CTFd.exceptions.challenges import (
     ChallengeCreateException,
+    ChallengeFlagRateLimitException,
+    ChallengeMaxAttemptsException,
     ChallengeSolveException,
     ChallengeUpdateException,
 )
@@ -729,6 +731,44 @@ class ChallengeAttempt(Resource):
 
         chal_class = get_chal_class(challenge.type)
 
+        def _attempt_with_logic_limits():
+            """
+            Call the challenge plugin attempt method while translating
+            limits enforced by the logic layer (max_attempts and the
+            per-account/per-challenge token bucket) into HTTP responses.
+            """
+            try:
+                return chal_class.attempt(challenge, request)
+            except ChallengeMaxAttemptsException as e:
+                return (
+                    {
+                        "success": True,
+                        "data": {
+                            "status": "ratelimited",
+                            "message": str(e),
+                        },
+                    },
+                    e.status_code,
+                )
+            except ChallengeFlagRateLimitException as e:
+                if ctftime():
+                    chal_class.ratelimited(
+                        user=user,
+                        team=team,
+                        challenge=challenge,
+                        request=request,
+                    )
+                return (
+                    {
+                        "success": True,
+                        "data": {
+                            "status": "ratelimited",
+                            "message": str(e),
+                        },
+                    },
+                    e.status_code,
+                )
+
         # Anti-bruteforce / submitting Flags too quickly
         recent_fails = current_user.get_wrong_submissions_per_delta(user.account_id)
         kpm = len(recent_fails)
@@ -838,7 +878,9 @@ class ChallengeAttempt(Resource):
 
         # Challenge not solved yet
         if not solves:
-            response = chal_class.attempt(challenge, request)
+            response = _attempt_with_logic_limits()
+            if isinstance(response, tuple) and isinstance(response[0], dict):
+                return response
             # TODO: CTFd 4.0 We should remove the tuple strategy for Challenge plugins in favor of ChallengeResponse
             if isinstance(response, tuple):
                 status = response[0]
@@ -994,7 +1036,9 @@ class ChallengeAttempt(Resource):
                 challenge_id=challenge_id,
                 kpm=kpm,
             )
-            response = chal_class.attempt(challenge, request)
+            response = _attempt_with_logic_limits()
+            if isinstance(response, tuple) and isinstance(response[0], dict):
+                return response
             # TODO: CTFd 4.0 We should remove the tuple strategy for Challenge plugins in favor of ChallengeResponse
             if isinstance(response, tuple):
                 status = response[0]

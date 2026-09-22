@@ -164,7 +164,16 @@ def ratelimit(method="POST", limit=50, interval=300, key_prefix="rl"):
         @functools.wraps(f)
         def ratelimit_function(*args, **kwargs):
             ip_address = current_user.get_ip()
-            key = "{}:{}:{}".format(key_prefix, ip_address, request.endpoint)
+            # Key on the authenticated account in addition to the IP address.
+            # IP-only keys can be bypassed by spreading requests across IPs /
+            # machines; tying the counter to the account closes that hole
+            # while preserving IP-based limiting for unauthenticated requests.
+            identity = ip_address
+            if current_user.authed():
+                user = get_current_user()
+                if user is not None:
+                    identity = "user{}".format(user.account_id)
+            key = "{}:{}:{}".format(key_prefix, identity, request.endpoint)
             current = cache.get(key)
 
             if request.method == method:
